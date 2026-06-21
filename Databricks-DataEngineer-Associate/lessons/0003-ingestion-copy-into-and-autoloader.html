@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 03 — Ingestion: COPY INTO &amp; Auto Loader</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+  <header class="lesson-header">
+    <p class="lesson-meta">
+      <span class="domain-badge">Domain 2 · 30%</span>
+      Lesson 03 of 12 &nbsp;·&nbsp; Development &amp; Ingestion
+    </p>
+    <h1>Ingestion: COPY INTO &amp; Auto Loader</h1>
+  </header>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>1. The ingestion problem</h2>
+
+  <p>Data engineering almost always starts with the same question: <em>how do I get files from cloud storage into a Delta table?</em> Files arrive as CSV, JSON, Parquet, etc. in S3, Azure Data Lake, or GCS. You need to load them into Bronze.</p>
+
+  <p>Databricks gives you two tools for this. Choosing between them is a common exam question.</p>
+
+  <div class="diagram">  Cloud Storage (S3 / ADLS / GCS)
+  ┌──────────────────────────────────┐
+  │  orders_2026-06-01.csv           │
+  │  orders_2026-06-02.csv           │
+  │  orders_2026-06-03.csv  ← new   │
+  └──────────┬───────────────────────┘
+             │
+      ┌──────┴──────┐
+      │             │
+  COPY INTO     Auto Loader
+  (batch SQL)   (streaming Python)
+      │             │
+      └──────┬──────┘
+             ▼
+     Delta Table (Bronze)</div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>2. COPY INTO — batch SQL ingestion</h2>
+
+  <p><code>COPY INTO</code> is a SQL command that loads files from a cloud storage path into a Delta table. Its killer feature: it is <strong>idempotent</strong>. Run it ten times on the same folder and it only loads each file <em>once</em> — it tracks which files it has already processed and skips them.</p>
+
+  <pre>COPY INTO orders
+FROM 's3://my-bucket/raw/orders/'
+FILEFORMAT = CSV
+FORMAT_OPTIONS ('header' = 'true', 'inferSchema' = 'true')
+COPY_OPTIONS ('mergeSchema' = 'true');</pre>
+
+  <p>Breaking that down:</p>
+  <ul>
+    <li><code>COPY INTO orders</code> — target Delta table</li>
+    <li><code>FROM 's3://...'</code> — source path (S3, ADLS, or GCS)</li>
+    <li><code>FILEFORMAT = CSV</code> — supported formats: CSV, JSON, PARQUET, AVRO, ORC, TEXT, BINARYFILE</li>
+    <li><code>FORMAT_OPTIONS</code> — file-specific settings (e.g. header row, delimiter)</li>
+    <li><code>COPY_OPTIONS ('mergeSchema' = 'true')</code> — allow new columns (schema evolution)</li>
+  </ul>
+
+  <div class="callout exam-tip">
+    COPY INTO is <strong>idempotent</strong> — re-running it on the same path is safe. It skips already-loaded files. This is the word the exam uses: idempotent.
+  </div>
+
+  <h3>When to use COPY INTO</h3>
+  <ul>
+    <li>Loading a <strong>bounded, known set of files</strong> (e.g. a one-time historical load)</li>
+    <li>When you want <strong>SQL-only</strong> — no Python needed</li>
+    <li>Hundreds to low thousands of files — manageable scale</li>
+  </ul>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>3. Auto Loader — incremental streaming ingestion</h2>
+
+  <p>Auto Loader is Databricks' answer to continuous ingestion: files land in cloud storage and are automatically picked up and processed as a <strong>stream</strong>. You do not poll for new files — Auto Loader watches the folder for you.</p>
+
+  <p>It uses Spark's Structured Streaming under the hood, written in Python:</p>
+
+  <pre>df = (spark.readStream
+        .format("cloudFiles")              # Auto Loader source
+        .option("cloudFiles.format", "csv")
+        .option("cloudFiles.schemaLocation", "/checkpoints/orders_schema")
+        .load("s3://my-bucket/raw/orders/"))
+
+df.writeStream
+  .option("checkpointLocation", "/checkpoints/orders")
+  .trigger(availableNow=True)             # or .trigger(processingTime="10 minutes")
+  .toTable("orders")</pre>
+
+  <p>Key things to notice:</p>
+  <ul>
+    <li><code>.format("cloudFiles")</code> — this is the Auto Loader source format. <code>cloudFiles</code> is the magic keyword.</li>
+    <li><code>cloudFiles.format</code> — the format of the incoming files (csv, json, parquet…)</li>
+    <li><code>cloudFiles.schemaLocation</code> — where Auto Loader saves the inferred schema so it doesn't have to re-infer every run</li>
+    <li><code>checkpointLocation</code> — where Auto Loader tracks which files it has already processed</li>
+  </ul>
+
+  <div class="callout exam-tip">
+    If you see <code>format("cloudFiles")</code> in exam code — that is Auto Loader. That string is the identifier.
+  </div>
+
+  <h3>The checkpoint — how Auto Loader remembers what it processed</h3>
+  <p>The <code>checkpointLocation</code> is critical. Auto Loader writes a checkpoint file every time it processes a batch of new files. If the job restarts, it reads the checkpoint and continues from exactly where it left off — no duplicate processing, no missed files.</p>
+
+  <div class="callout exam-tip">
+    If a question says "Auto Loader restarted and reprocessed all files from the beginning" — the checkpoint location was missing or deleted.
+  </div>
+
+  <h3>Schema inference and evolution in Auto Loader</h3>
+  <p>Auto Loader can infer the schema of incoming files automatically and store it at <code>cloudFiles.schemaLocation</code>. When a new column appears in a future file, it can evolve the schema automatically — no manual intervention needed.</p>
+
+  <h3>When to use Auto Loader</h3>
+  <ul>
+    <li>Files arrive <strong>continuously</strong> over time (daily drops, real-time feeds)</li>
+    <li><strong>Millions of files</strong> — Auto Loader scales far beyond COPY INTO</li>
+    <li>You need <strong>automatic schema inference and evolution</strong></li>
+    <li>You want the pipeline to <strong>run continuously or on a trigger</strong></li>
+  </ul>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>4. COPY INTO vs. Auto Loader — the exam comparison</h2>
+
+  <div class="diagram">                  COPY INTO          AUTO LOADER
+  ─────────────────────────────────────────────────────
+  Language          SQL                Python (Streaming)
+  Best for          Bounded file sets  Continuous / millions of files
+  Idempotent        ✓ Yes              ✓ Yes (via checkpoint)
+  Schema inference  Manual             Automatic (cloudFiles.schemaLocation)
+  Scale             Hundreds of files  Millions of files
+  Trigger           Manual / scheduled Continuous or triggered
+  Keyword           COPY INTO          format("cloudFiles")</div>
+
+  <div class="callout exam-tip">
+    The exam will give you a scenario and ask which to use. The decision rule:<br>
+    — Known, finite set of files + SQL preference → <strong>COPY INTO</strong><br>
+    — Files arriving continuously + large scale → <strong>Auto Loader</strong>
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>5. Trigger modes in Auto Loader</h2>
+
+  <p>Auto Loader does not have to run 24/7. You control how often it wakes up with <code>.trigger()</code>:</p>
+
+  <pre>## Process all available files right now, then stop
+.trigger(availableNow=True)
+
+## Run every 10 minutes
+.trigger(processingTime="10 minutes")
+
+## Run continuously (default if no trigger set)
+.trigger(continuous="1 second")</pre>
+
+  <div class="callout exam-tip">
+    <code>availableNow=True</code> is the most exam-tested trigger. It means: process everything currently in the folder, then stop. Useful for scheduled batch-style runs using a streaming API.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Primary source</h2>
+  <p>
+    <a href="https://docs.databricks.com/en/ingestion/auto-loader/index.html" target="_blank">
+      Databricks Docs — What is Auto Loader?
+    </a>
+    — read the overview and the "When to use Auto Loader vs COPY INTO" section (10 min).
+  </p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div
+    class="brain-dump"
+    id="bd3"
+    data-prompt="Without looking back: What does COPY INTO do and what does 'idempotent' mean in this context? Write the basic COPY INTO SQL syntax. What is Auto Loader and what format keyword identifies it in code? What is the checkpointLocation and why does it matter? What is cloudFiles.schemaLocation used for? When would you choose COPY INTO over Auto Loader, and vice versa? What does trigger(availableNow=True) do?"
+    data-points='[
+      "COPY INTO loads files from cloud storage into a Delta table; idempotent = re-running it skips already-loaded files",
+      "COPY INTO table FROM path FILEFORMAT = type FORMAT_OPTIONS (...)",
+      "Auto Loader uses format(\"cloudFiles\") — that string is the identifier in exam code",
+      "checkpointLocation tracks which files Auto Loader has already processed; losing it causes reprocessing from scratch",
+      "cloudFiles.schemaLocation stores the inferred schema so Auto Loader does not re-infer on every run",
+      "COPY INTO → bounded/known file sets, SQL-only, smaller scale",
+      "Auto Loader → continuous file arrival, millions of files, automatic schema inference",
+      "trigger(availableNow=True) → process all files currently in the folder then stop (batch-style run)"
+    ]'
+  ></div>
+
+
+  <div class="nav-links">
+    <a href="0002-delta-lake-fundamentals.html">← Lesson 02</a>
+    <a href="0004-pyspark-and-spark-sql-basics.html">Next: Lesson 04 — PySpark &amp; Spark SQL →</a>
+  </div>
+
+  <footer class="lesson-footer">
+    <span>Lesson 03 · Domain 2: Development &amp; Ingestion (30%)</span>
+    <span>Ask your teacher to go deeper on anything that's unclear.</span>
+  </footer>
+
+</div>
+<script src="../assets/brain-dump.js"></script>
+</body>
+</html>

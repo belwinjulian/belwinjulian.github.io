@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 01 — The Databricks Intelligence Platform</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+  <header class="lesson-header">
+    <p class="lesson-meta">
+      <span class="domain-badge">Domain 1 · 10%</span>
+      Lesson 01 of 12 &nbsp;·&nbsp; Databricks Intelligence Platform
+    </p>
+    <h1>The Databricks Intelligence Platform &amp; the Lakehouse</h1>
+  </header>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>1. The problem: why did Databricks exist at all?</h2>
+
+  <p>Before Databricks, companies had two imperfect choices for storing data:</p>
+
+  <ul>
+    <li><strong>Data Warehouse</strong> (e.g. Snowflake, Redshift) — fast SQL queries, reliable, but expensive and rigid. It only handled <em>structured</em> data (neat tables). Raw files, images, and semi-structured JSON had no place here.</li>
+    <li><strong>Data Lake</strong> (e.g. raw files in Amazon S3 or Azure ADLS) — cheap, flexible, stores anything. But no ACID guarantees — you could corrupt data and not know it. Queries were slow and unreliable.</li>
+  </ul>
+
+  <p>Neither was enough. The warehouse was too rigid; the lake was too unreliable.</p>
+
+  <div class="callout exam-tip">
+    A Data Warehouse gives you reliability but locks you into structured data.<br>
+    A Data Lake gives you flexibility but no guarantees. The Lakehouse gives you both.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>2. The Lakehouse: one architecture to rule them all</h2>
+
+  <p>A <strong>Lakehouse</strong> is an architecture that sits <em>on top of cheap cloud storage</em> (S3, ADLS, GCS) and adds the reliability of a data warehouse on top. You keep your raw files exactly where they are — no copying to a separate warehouse — but now you get ACID transactions, schema enforcement, and fast queries.</p>
+
+  <p>The secret ingredient that makes this possible is <strong>Delta Lake</strong>.</p>
+
+  <div class="diagram">┌─────────────────────────────────────────────────────┐
+│              DATABRICKS PLATFORM                    │
+│  Notebooks · Workflows · SQL · ML · Streaming       │
+├─────────────────────────────────────────────────────┤
+│                  DELTA LAKE                         │
+│  (ACID transactions · Schema enforcement ·          │
+│   Time travel · Transaction log)                    │
+├─────────────────────────────────────────────────────┤
+│            CLOUD OBJECT STORAGE                     │
+│        S3  ·  Azure Data Lake  ·  GCS               │
+└─────────────────────────────────────────────────────┘
+         ↑ This whole stack = the Lakehouse</div>
+
+  <p>Delta Lake is not a separate database. It is a <strong>storage layer</strong> — a set of rules and a transaction log written alongside your Parquet files on cloud storage. The files stay where they are; Delta Lake just makes them trustworthy.</p>
+
+  <div class="callout exam-tip">
+    Delta Lake stores data as <strong>Parquet files</strong> plus a <strong><code>_delta_log/</code></strong> transaction log folder. The log is what gives you ACID properties. If the exam asks "what format does Delta Lake use?" — Parquet files + JSON transaction log.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>3. What ACID actually means</h2>
+
+  <p>ACID sounds intimidating. Here is what each letter means in plain language:</p>
+
+  <ul>
+    <li><strong>Atomicity</strong> — a write either fully succeeds or fully fails. No partial updates.</li>
+    <li><strong>Consistency</strong> — data always matches the schema rules. Bad data is rejected.</li>
+    <li><strong>Isolation</strong> — two people writing at the same time don't corrupt each other's work.</li>
+    <li><strong>Durability</strong> — once a write is committed, it stays committed (even if a server crashes).</li>
+  </ul>
+
+  <p>In practice: you can trust Delta tables. If a job fails halfway through writing, your table is not corrupted.</p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>4. The Medallion Architecture: Bronze, Silver, Gold</h2>
+
+  <p>Most Databricks projects organise data into three layers. This is called the <strong>Medallion Architecture</strong>. Think of it as a refinery that progressively cleans raw ore into pure metal.</p>
+
+  <div class="diagram">   RAW DATA IN              CLEAN DATA OUT
+   (files, APIs, DBs)       (business-ready)
+
+  ┌──────────┐   transform  ┌──────────┐   transform  ┌────────┐
+  │  BRONZE  │ ──────────▶  │  SILVER  │ ──────────▶  │  GOLD  │
+  └──────────┘              └──────────┘              └────────┘
+  Raw ingestion             Cleaned &amp;               Aggregated /
+  No changes                validated               reporting-ready
+  "as-is" copy              Deduplicated            Business metrics</div>
+
+  <ul>
+    <li><strong>Bronze</strong> — Raw data, exactly as it arrived. CSV, JSON, database dumps. Keep everything; delete nothing. This is your audit trail.</li>
+    <li><strong>Silver</strong> — Cleaned, deduplicated, validated. A row that was null in Bronze is filtered out here. Schema is enforced.</li>
+    <li><strong>Gold</strong> — Aggregated, business-ready. Dashboards, reports, and ML models read from Gold. It might be daily sales totals, user retention metrics, etc.</li>
+  </ul>
+
+  <div class="callout exam-tip">
+    The exam will present scenarios asking which layer data belongs in. The rule: if it's untouched raw input → Bronze. If it's cleaned but still granular → Silver. If it's aggregated for business use → Gold.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>5. The Databricks platform components</h2>
+
+  <p>Databricks is the company that created Delta Lake and built a cloud platform on top of the Lakehouse pattern. Here are the core components you will see on the exam:</p>
+
+  <ul>
+    <li><strong>Workspace</strong> — the web UI where you write code, create notebooks, and manage jobs. Think of it as your project folder in the cloud.</li>
+    <li><strong>Cluster</strong> — a group of virtual machines that actually run your Spark code. You spin clusters up to compute, then shut them down to save money. Two types: <em>All-Purpose</em> (interactive, you use while working) and <em>Job</em> (automated, for production runs).</li>
+    <li><strong>Notebook</strong> — a document with runnable code cells (Python, SQL, or Scala). This is where you write and test transformations.</li>
+    <li><strong>Apache Spark</strong> — the distributed computation engine under the hood. When you write <code>SELECT</code> or a DataFrame operation, Spark executes it across the cluster. You do not need to manage Spark directly — Databricks manages it.</li>
+    <li><strong>Unity Catalog</strong> — the governance layer. Controls who can read/write which tables and tracks data lineage.</li>
+    <li><strong>Delta Lake</strong> — as above: the reliable storage layer on top of cloud files.</li>
+  </ul>
+
+  <div class="callout note">
+    The exam is SQL-first. When a question says "write a transformation," expect SQL. Python (PySpark) appears when SQL can't express the operation.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>6. How they all fit together</h2>
+
+  <div class="diagram">  You (Notebook / SQL)
+         │
+         ▼
+  ┌─────────────┐
+  │   Cluster   │  ← runs Apache Spark
+  └──────┬──────┘
+         │ reads &amp; writes
+         ▼
+  ┌─────────────────────┐
+  │    Delta Tables     │  ← Delta Lake on cloud storage
+  │  Bronze/Silver/Gold │
+  └─────────────────────┘
+         │
+         ▼
+  Unity Catalog governs access to all of the above</div>
+
+  <p>Every lesson from here builds on this diagram. Keep it in mind as your mental model for the whole course.</p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Primary source</h2>
+
+  <p>
+    Read this before your next session:
+    <a href="https://docs.databricks.com/en/introduction/index.html" target="_blank">
+      Databricks Documentation — Introduction to Databricks
+    </a>
+    (5–10 min). Focus on the architecture overview section.
+  </p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- BRAIN DUMP WIDGET -->
+  <div
+    class="brain-dump"
+    id="bd1"
+    data-prompt="Close or scroll past the lesson above. Then answer: What problem does the Lakehouse solve? What is Delta Lake and what two things does it store on disk? Describe the three Medallion layers and what goes in each. Name four Databricks platform components and what each one does."
+    data-points='[
+      "Lakehouse solves the warehouse/lake tradeoff: reliability of a warehouse + flexibility of a lake on cheap cloud storage",
+      "Delta Lake is a storage layer (not a separate database) that sits on top of Parquet files + a _delta_log/ transaction log",
+      "ACID = Atomicity, Consistency, Isolation, Durability — means writes are trustworthy and never partially corrupt",
+      "Bronze = raw data as-is, no changes, full audit trail",
+      "Silver = cleaned, deduplicated, validated, schema enforced",
+      "Gold = aggregated, business-ready, used by dashboards and reports",
+      "Workspace = web UI / project environment",
+      "Cluster = virtual machines that run Spark compute",
+      "Notebook = runnable code document (Python / SQL)",
+      "Unity Catalog = governance layer (who can access what)"
+    ]'
+  ></div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div class="nav-links">
+    <a href="0002-delta-lake-fundamentals.html">Next: Lesson 02 — Delta Lake Fundamentals →</a>
+  </div>
+
+  <footer class="lesson-footer">
+    <span>Lesson 01 · Domain 1: Databricks Intelligence Platform (10%)</span>
+    <span>Ask your teacher to go deeper on anything that's unclear.</span>
+  </footer>
+
+</div>
+<script src="../assets/brain-dump.js"></script>
+</body>
+</html>

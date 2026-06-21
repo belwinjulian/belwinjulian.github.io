@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 02 — Delta Lake Fundamentals</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+  <header class="lesson-header">
+    <p class="lesson-meta">
+      <span class="domain-badge">Domains 1–3</span>
+      Lesson 02 of 12 &nbsp;·&nbsp; Delta Lake Fundamentals
+    </p>
+    <h1>Delta Lake Fundamentals</h1>
+  </header>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>1. Quick recap: what Delta Lake stores on disk</h2>
+
+  <p>From Lesson 1: Delta Lake stores two things side by side in cloud storage:</p>
+
+  <div class="diagram">my_table/
+├── part-00000.parquet    ← actual data (Parquet files)
+├── part-00001.parquet
+└── _delta_log/
+    ├── 00000000000000000000.json   ← transaction 0 (table created)
+    ├── 00000000000000000001.json   ← transaction 1 (first INSERT)
+    └── 00000000000000000002.json   ← transaction 2 (UPDATE ran)</div>
+
+  <p>Every write — INSERT, UPDATE, DELETE — appends a new JSON entry to <code>_delta_log/</code>. Delta never overwrites old Parquet files immediately; it writes new ones and records the change in the log. This is what makes ACID possible, and it's also what enables <strong>Time Travel</strong>.</p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>2. Time Travel</h2>
+
+  <p>Because Delta Lake keeps every version of your data in the transaction log, you can query <em>any past version</em> of a table. This is called <strong>Time Travel</strong>.</p>
+
+  <p>There are two ways to specify which version you want:</p>
+
+  <h3>By version number</h3>
+  <pre>-- See the table as it was at version 3
+SELECT * FROM orders VERSION AS OF 3;</pre>
+
+  <h3>By timestamp</h3>
+  <pre>-- See the table as it was on a specific date
+SELECT * FROM orders TIMESTAMP AS OF '2026-05-01';</pre>
+
+  <h3>Check what versions exist</h3>
+  <pre>-- Lists every transaction: who ran it, when, what operation
+DESCRIBE HISTORY orders;</pre>
+
+  <p><code>DESCRIBE HISTORY</code> is your go-to command when you need to audit a table or find a version to restore to. It shows you the version number, timestamp, operation type (WRITE, UPDATE, DELETE, MERGE), and who made the change.</p>
+
+  <div class="callout exam-tip">
+    The exam loves <code>DESCRIBE HISTORY</code>. If a question asks "how do you see all past changes to a Delta table?" — that's your answer.
+  </div>
+
+  <h3>Restoring a table to a past version</h3>
+  <p>Time Travel is read-only by default — you're just querying the past. To actually <em>roll back</em> the table, use <code>RESTORE</code>:</p>
+  <pre>-- Roll the table back to version 2
+RESTORE TABLE orders TO VERSION AS OF 2;
+
+-- Or roll back to a timestamp
+RESTORE TABLE orders TO TIMESTAMP AS OF '2026-05-01';</pre>
+
+  <div class="callout exam-tip">
+    <code>SELECT ... VERSION AS OF</code> = read the past (table is unchanged).<br>
+    <code>RESTORE TABLE ... TO VERSION AS OF</code> = actually roll the table back.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>3. OPTIMIZE and VACUUM</h2>
+
+  <p>Over time, lots of small writes create lots of small Parquet files. Small files are slow to query. Two commands fix this:</p>
+
+  <h3>OPTIMIZE — compact small files</h3>
+  <pre>OPTIMIZE orders;</pre>
+
+  <p><code>OPTIMIZE</code> combines many small Parquet files into fewer, larger ones. This makes queries faster. It does <em>not</em> delete any data — it just reorganises the files.</p>
+
+  <div class="callout note">
+    OPTIMIZE can also use <strong>Z-ordering</strong> to co-locate related data on disk:<br>
+    <code>OPTIMIZE orders ZORDER BY (customer_id);</code><br>
+    This speeds up queries that filter on <code>customer_id</code>. The exam may ask what Z-ordering does: it organises data on disk so rows with the same column values are stored near each other.
+  </div>
+
+  <h3>VACUUM — remove old files</h3>
+  <pre>VACUUM orders;</pre>
+
+  <p><code>VACUUM</code> permanently deletes old Parquet files that are no longer referenced by the current version of the table. By default it keeps files from the <strong>last 7 days</strong> (168 hours) so that Time Travel still works within that window.</p>
+
+  <pre>-- You can lower the retention, but this breaks Time Travel for deleted versions
+VACUUM orders RETAIN 24 HOURS;</pre>
+
+  <div class="callout exam-tip">
+    Three things to know cold about VACUUM:<br>
+    1. It permanently deletes files — irreversible.<br>
+    2. Default retention = <strong>7 days</strong>.<br>
+    3. Running VACUUM cuts off Time Travel for versions older than the retention window.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>4. Schema enforcement vs. schema evolution</h2>
+
+  <p>Delta Lake is strict about the shape (schema) of data by default.</p>
+
+  <h3>Schema enforcement (the default)</h3>
+  <p>If you try to write data with a <em>different</em> schema than the table — a new column, a wrong data type — Delta will <strong>reject the write and throw an error</strong>. The table is protected. This is schema enforcement.</p>
+
+  <pre>-- This INSERT will FAIL if 'discount' column doesn't exist in orders
+INSERT INTO orders SELECT *, 0.1 AS discount FROM new_data;</pre>
+
+  <h3>Schema evolution (opt-in)</h3>
+  <p>Sometimes you legitimately want to add a new column. You can tell Delta to accept it and update the schema automatically using <code>mergeSchema</code>:</p>
+
+  <pre>-- Python: allow new columns to be added
+df.write.option("mergeSchema", "true").mode("append").saveAsTable("orders")</pre>
+
+  <pre>-- SQL: set the spark config to allow schema evolution for this session
+SET spark.databricks.delta.schema.autoMerge.enabled = true;</pre>
+
+  <div class="callout exam-tip">
+    Schema enforcement = Delta <strong>rejects</strong> mismatched writes (default, safe).<br>
+    Schema evolution = Delta <strong>accepts</strong> new columns and updates the schema (opt-in, using <code>mergeSchema</code>).
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>5. Managed vs. External tables</h2>
+
+  <p>When you create a Delta table in Databricks, you have two choices for where the data files live:</p>
+
+  <h3>Managed table (default)</h3>
+  <pre>CREATE TABLE orders (
+  order_id INT,
+  customer STRING,
+  amount DOUBLE
+);</pre>
+
+  <p>Databricks controls the file location (inside a default storage path it manages). When you <code>DROP TABLE orders</code>, the data files are <strong>deleted permanently</strong>.</p>
+
+  <h3>External table</h3>
+  <pre>CREATE TABLE orders_external
+LOCATION 's3://my-bucket/orders/';</pre>
+
+  <p>You specify the file location. When you <code>DROP TABLE orders_external</code>, the table definition is removed but the data files in S3/ADLS <strong>remain untouched</strong>.</p>
+
+  <div class="callout exam-tip">
+    The key exam distinction:<br>
+    <strong>Managed:</strong> DROP TABLE = data is deleted.<br>
+    <strong>External:</strong> DROP TABLE = only the metadata is removed; files survive.<br><br>
+    If a question says "the team accidentally dropped a table and lost data" — they had a managed table.
+  </div>
+
+  <div class="diagram">  MANAGED TABLE                    EXTERNAL TABLE
+  ┌───────────────────┐           ┌───────────────────┐
+  │ Databricks owns   │           │ You own the path  │
+  │ the file location │           │ (S3, ADLS, GCS)   │
+  └────────┬──────────┘           └────────┬──────────┘
+           │ DROP TABLE                    │ DROP TABLE
+           ▼                               ▼
+     FILES DELETED                  FILES SURVIVE
+     (gone forever)                 (metadata removed only)</div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Primary source</h2>
+  <p>
+    <a href="https://docs.delta.io/latest/delta-intro.html" target="_blank">
+      Delta Lake Documentation — Introduction &amp; Key Features
+    </a>
+    — scan the Time Travel and Schema Enforcement sections (10 min).
+  </p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div
+    class="brain-dump"
+    id="bd2"
+    data-prompt="Without looking back: What are the two things Delta Lake stores on disk? What command shows all past versions of a table? How do you query a past version (give the SQL)? How do you roll a table back? What does OPTIMIZE do? What does VACUUM do, and what is the default retention? What is the difference between schema enforcement and schema evolution? What is the difference between a managed and an external table when you DROP it?"
+    data-points='[
+      "_delta_log/ transaction log (JSON files) + Parquet data files",
+      "DESCRIBE HISTORY table_name — shows all versions, timestamps, and operations",
+      "SELECT * FROM table VERSION AS OF 3  (or TIMESTAMP AS OF date)",
+      "RESTORE TABLE table TO VERSION AS OF 3 — actually rolls the table back",
+      "OPTIMIZE compacts many small Parquet files into fewer large ones (faster queries)",
+      "VACUUM permanently deletes old files; default retention = 7 days (168 hours)",
+      "VACUUM cuts off Time Travel for versions older than the retention window",
+      "Schema enforcement = Delta rejects writes with wrong/extra columns (default)",
+      "Schema evolution = Delta accepts new columns when mergeSchema option is set",
+      "Managed table: DROP TABLE deletes the data files permanently",
+      "External table: DROP TABLE removes only metadata; files in cloud storage survive"
+    ]'
+  ></div>
+
+
+  <div class="nav-links">
+    <a href="0001-databricks-intelligence-platform.html">← Lesson 01</a>
+    <a href="0003-ingestion-copy-into-and-autoloader.html">Next: Lesson 03 — Ingestion →</a>
+  </div>
+
+  <footer class="lesson-footer">
+    <span>Lesson 02 · Delta Lake Fundamentals · Domains 1–3</span>
+    <span>Ask your teacher to go deeper on anything that's unclear.</span>
+  </footer>
+
+</div>
+<script src="../assets/brain-dump.js"></script>
+</body>
+</html>
