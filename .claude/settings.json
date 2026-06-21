@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"/Users/belwinjulian/Desktop/BRAIN/push-lessons.sh\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

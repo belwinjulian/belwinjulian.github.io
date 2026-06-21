@@ -1,0 +1,13 @@
+.DS_Store
+**/.DS_Store
+.Spotlight-V100
+.Trashes
+.agents/
+.claude/skills/
+**/settings.local.json
+**/learning-records/
+**/NOTES.md
+.vscode/
+*.swp
+*.swo
+*~
