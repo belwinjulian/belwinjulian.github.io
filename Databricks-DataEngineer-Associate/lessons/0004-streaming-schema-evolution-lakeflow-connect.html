@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 04 — Streaming, Schema Evolution &amp; Lakeflow Connect</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+  <header class="lesson-header">
+    <p class="lesson-meta">
+      <span class="domain-badge">Domain 2 · 30%</span>
+      Lesson 04 of 12 &nbsp;·&nbsp; Development &amp; Ingestion
+    </p>
+    <h1>Streaming, Schema Evolution &amp; Lakeflow Connect</h1>
+  </header>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>1. Structured Streaming — how it actually works</h2>
+
+  <p>Lesson 3 showed you that Auto Loader runs on top of Spark's <strong>Structured Streaming</strong> engine. Before you can use it confidently on the exam, you need to understand what that engine is doing.</p>
+
+  <p>The mental model: Structured Streaming treats an incoming stream of data as an <em>infinite table</em>. Every time new data arrives, Spark appends rows to that table and runs your query on the new rows only. The result is written to a sink (your Delta table).</p>
+
+  <div class="diagram">  Stream of events (Kafka, files, Delta CDC…)
+             │
+             ▼
+  ┌──────────────────────┐
+  │  Micro-batch trigger │  ← wakes up on a schedule or when data arrives
+  │  (process new rows)  │
+  └──────────┬───────────┘
+             │
+             ▼
+  ┌──────────────────────┐
+  │  Query / Transform   │  ← same Spark SQL / DataFrame logic as batch
+  └──────────┬───────────┘
+             │
+             ▼
+  ┌──────────────────────┐
+  │  Sink (Delta table)  │
+  └──────────────────────┘</div>
+
+  <p>The key difference from batch: <strong>the job keeps running</strong> (or re-runs on a trigger) and only processes <em>new</em> data each time, using the checkpoint to remember where it left off.</p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>2. Output modes</h2>
+
+  <p>When Structured Streaming writes results to a sink, it needs to know <em>how</em> to write them. There are three output modes:</p>
+
+  <ul>
+    <li><strong>Append</strong> — only write new rows to the sink. Nothing already there is changed. This is the default and the most common for Delta tables.</li>
+    <li><strong>Complete</strong> — rewrite the entire result table every trigger. Used for aggregations where you want a full summary (e.g. running totals). Expensive on large data.</li>
+    <li><strong>Update</strong> — only write rows that changed since the last trigger. More efficient than Complete for aggregations but not all sinks support it.</li>
+  </ul>
+
+  <pre>df.writeStream
+  .outputMode("append")          # most common for Delta
+  .option("checkpointLocation", "/checkpoints/orders")
+  .toTable("orders")</pre>
+
+  <div class="callout exam-tip">
+    The exam will describe a scenario and ask which output mode to use. Rule of thumb:<br>
+    — New rows only → <strong>append</strong><br>
+    — Full aggregation result each time → <strong>complete</strong><br>
+    — Only changed aggregation rows → <strong>update</strong>
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>3. Trigger modes (recap + new)</h2>
+
+  <p>Lesson 3 introduced <code>availableNow=True</code>. Here is the full picture of what triggers control:</p>
+
+  <pre>## Process all available data now, then stop (batch-style run)
+.trigger(availableNow=True)
+
+## Wake up every N minutes (continuous micro-batch)
+.trigger(processingTime="5 minutes")
+
+## One micro-batch, then stop (older pattern — prefer availableNow)
+.trigger(once=True)
+
+## Near-real-time (runs in a single continuous query, low latency)
+.trigger(continuous="1 second")</pre>
+
+  <div class="callout exam-tip">
+    <code>trigger(once=True)</code> and <code>trigger(availableNow=True)</code> look similar but differ: <code>once</code> runs a single micro-batch then stops; <code>availableNow</code> runs <em>all</em> micro-batches until the source is caught up, then stops. <code>availableNow</code> is preferred and more common on the exam.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>4. Schema enforcement vs. schema evolution</h2>
+
+  <p>Delta Lake has strong opinions about schema. Understanding the two modes is a common exam topic.</p>
+
+  <h3>Schema enforcement (default)</h3>
+  <p>By default, Delta Lake <strong>enforces</strong> the schema of the table. If you try to write data that doesn't match — extra columns, wrong types — Delta will <strong>reject the write and throw an error</strong>. This protects your table from accidental corruption.</p>
+
+  <div class="callout exam-tip">
+    Schema enforcement is the <strong>default behavior</strong> in Delta Lake. Writing mismatched data fails unless you explicitly enable evolution.
+  </div>
+
+  <h3>Schema evolution — mergeSchema</h3>
+  <p>When you <em>want</em> new columns to be accepted automatically, you enable schema evolution. For one-off writes:</p>
+
+  <pre>df.write \
+  .format("delta") \
+  .option("mergeSchema", "true") \
+  .mode("append") \
+  .saveAsTable("orders")</pre>
+
+  <p>In SQL (COPY INTO or CREATE TABLE AS SELECT):</p>
+
+  <pre>COPY INTO orders
+FROM 's3://my-bucket/raw/'
+FILEFORMAT = PARQUET
+COPY_OPTIONS ('mergeSchema' = 'true');</pre>
+
+  <h3>Schema evolution — autoMerge (session config)</h3>
+  <p>For streaming or repeated writes where you always want schema evolution on, set it at the Spark session level instead of per-write:</p>
+
+  <pre>spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")</pre>
+
+  <p>With <code>autoMerge</code> enabled, any write that adds new columns will silently extend the Delta table schema instead of failing. Existing columns are never dropped.</p>
+
+  <div class="diagram">  Incoming file has columns: id, name, email, phone (new!)
+                                                     ↑
+  Delta table has:          id, name, email
+
+  mergeSchema = false  →  ERROR: column "phone" not in schema
+  mergeSchema = true   →  table gains "phone" column; existing rows get NULL</div>
+
+  <div class="callout exam-tip">
+    When a new column appears and the write succeeds — schema evolution is on. Existing rows that predate the new column get <strong>NULL</strong> for that column. Delta never drops columns automatically.
+  </div>
+
+  <h3>What schema evolution does NOT do</h3>
+  <ul>
+    <li>It does <strong>not</strong> change the type of an existing column (e.g. string → int). That requires an explicit ALTER TABLE.</li>
+    <li>It does <strong>not</strong> delete columns that are no longer in the source.</li>
+    <li>It does <strong>not</strong> reorder columns.</li>
+  </ul>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>5. Schema evolution in Auto Loader</h2>
+
+  <p>Auto Loader has its own schema evolution story, controlled with <code>cloudFiles.schemaEvolutionMode</code>:</p>
+
+  <pre>df = (spark.readStream
+        .format("cloudFiles")
+        .option("cloudFiles.format", "json")
+        .option("cloudFiles.schemaLocation", "/checkpoints/schema")
+        .option("cloudFiles.schemaEvolutionMode", "addNewColumns")  # default
+        .load("s3://my-bucket/raw/"))</pre>
+
+  <p>The four modes:</p>
+  <ul>
+    <li><code>addNewColumns</code> (default) — new columns are added to the inferred schema; the stream restarts to pick them up</li>
+    <li><code>rescue</code> — new or mismatched columns are captured in a special <code>_rescued_data</code> JSON column instead of failing</li>
+    <li><code>failOnNewColumns</code> — throws an error when a new column is detected (strict mode)</li>
+    <li><code>none</code> — no schema evolution; new columns are silently dropped</li>
+  </ul>
+
+  <div class="callout exam-tip">
+    The <code>_rescued_data</code> column is an exam favourite. If you see it in answer choices, it means Auto Loader is set to <code>rescue</code> mode — it captured unexpected columns rather than failing or dropping them.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>6. Lakeflow Connect</h2>
+
+  <p>Auto Loader is great for files in cloud storage. But what about data from <strong>SaaS systems</strong> — Salesforce, Workday, Google Analytics, ServiceNow? Those don't dump files to S3 for you.</p>
+
+  <p><strong>Lakeflow Connect</strong> (formerly called Databricks Ingest) is Databricks' managed connector service. It provides pre-built, no-code connectors that pull data from SaaS sources directly into your Lakehouse.</p>
+
+  <div class="diagram">  SaaS Sources
+  ┌────────────┐   ┌─────────────┐   ┌──────────────┐
+  │ Salesforce │   │ Google Ads  │   │  ServiceNow  │   …
+  └─────┬──────┘   └──────┬──────┘   └──────┬───────┘
+        │                 │                  │
+        └────────────┬────┘──────────────────┘
+                     │
+              Lakeflow Connect
+              (managed connectors)
+                     │
+                     ▼
+             Delta Table (Bronze)
+             in Unity Catalog</div>
+
+  <h3>What Lakeflow Connect handles for you</h3>
+  <ul>
+    <li><strong>Authentication</strong> to the SaaS API</li>
+    <li><strong>Incremental sync</strong> — only pulls changed records, not the full dataset every time</li>
+    <li><strong>Schema mapping</strong> — SaaS fields → Delta columns</li>
+    <li><strong>Error handling and retries</strong></li>
+    <li><strong>Scheduling</strong> — runs on a configurable cadence via Lakeflow Jobs</li>
+  </ul>
+
+  <h3>When to use Lakeflow Connect vs. Auto Loader</h3>
+  <div class="diagram">                 LAKEFLOW CONNECT        AUTO LOADER
+  ──────────────────────────────────────────────────────────
+  Source           SaaS APIs               Files in cloud storage
+  Setup            No-code / UI            Python code
+  Managed by       Databricks              You (checkpoints, triggers)
+  Schema           Auto-mapped from API    Inferred from files
+  Use case         Salesforce, Workday…    CSV / JSON / Parquet drops</div>
+
+  <div class="callout exam-tip">
+    On the exam: if the scenario mentions a <strong>SaaS source</strong> (Salesforce, Google Analytics, SAP, etc.) and asks how to ingest it — the answer is <strong>Lakeflow Connect</strong>, not Auto Loader. Auto Loader is for <strong>files in cloud storage</strong>.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>7. Full ingestion picture</h2>
+
+  <p>Now that you have seen all three ingestion tools, here is how they fit together:</p>
+
+  <div class="diagram">  Data sources
+  ┌─────────────┐  ┌──────────────────┐  ┌────────────────┐
+  │ SaaS APIs   │  │ Files in storage  │  │ Files in storage│
+  │ (Salesforce,│  │ (bounded batch)   │  │ (continuous /  │
+  │  Workday…)  │  │                   │  │  high-volume)  │
+  └──────┬──────┘  └────────┬──────────┘  └───────┬────────┘
+         │                  │                      │
+  Lakeflow Connect      COPY INTO             Auto Loader
+  (managed, no-code)    (SQL, idempotent)     (streaming, scalable)
+         │                  │                      │
+         └──────────────────┴──────────────────────┘
+                            │
+                            ▼
+                    Bronze Delta Table</div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Primary source</h2>
+  <p>
+    <a href="https://docs.databricks.com/en/structured-streaming/index.html" target="_blank">
+      Databricks Docs — Structured Streaming
+    </a>
+    — read the overview and output modes sections (10 min). Then skim the
+    <a href="https://docs.databricks.com/en/ingestion/lakeflow-connect/index.html" target="_blank">
+      Lakeflow Connect overview
+    </a>
+    (5 min).
+  </p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div
+    class="brain-dump"
+    id="bd4"
+    data-prompt="Without looking back: What is Structured Streaming's mental model — how does it treat incoming data? What are the three output modes and when do you use each? What is the difference between trigger(once=True) and trigger(availableNow=True)? What does schema enforcement do by default in Delta Lake? What are two ways to enable schema evolution — and what happens to existing rows when a new column is added? What is the _rescued_data column in Auto Loader? What is Lakeflow Connect and when would you choose it over Auto Loader?"
+    data-points='[
+      "Structured Streaming treats a stream as an infinite table — new rows are appended each micro-batch trigger; checkpoint tracks progress",
+      "append = new rows only (default for Delta); complete = rewrite full result (aggregations); update = changed rows only",
+      "trigger(once) runs one micro-batch then stops; trigger(availableNow) runs all micro-batches until caught up then stops — availableNow is preferred",
+      "Schema enforcement is ON by default — writing mismatched data (extra columns, wrong types) throws an error",
+      "Enable evolution per-write with .option(mergeSchema, true) or globally with spark.conf.set(autoMerge.enabled, true); existing rows get NULL for new columns",
+      "_rescued_data is a JSON column Auto Loader creates in rescue mode — it captures unexpected or mismatched columns instead of failing",
+      "Lakeflow Connect is for SaaS API sources (Salesforce, Workday…); Auto Loader is for files in cloud storage"
+    ]'
+  ></div>
+
+
+  <div class="nav-links">
+    <a href="0003-ingestion-copy-into-and-autoloader.html">← Lesson 03</a>
+    <a href="0005-pyspark-and-spark-sql-basics.html">Next: Lesson 05 — PySpark &amp; Spark SQL →</a>
+  </div>
+
+  <footer class="lesson-footer">
+    <span>Lesson 04 · Domain 2: Development &amp; Ingestion (30%)</span>
+    <span>Ask your teacher to go deeper on anything that's unclear.</span>
+  </footer>
+
+</div>
+<script src="../assets/brain-dump.js"></script>
+</body>
+</html>
