@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 06 — DataFrame Operations: Joins, Dedup &amp; Aggregations</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+  <header class="lesson-header">
+    <p class="lesson-meta">
+      <span class="domain-badge">Domain 3 · 31%</span>
+      Lesson 06 of 12 &nbsp;·&nbsp; Data Processing &amp; Transformations
+    </p>
+    <h1>DataFrame Operations: Joins, Dedup &amp; Aggregations</h1>
+  </header>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>1. Joins</h2>
+
+  <p>A join combines two DataFrames (or tables) by matching rows on a shared key column. This is one of the most tested topics in Domain 3.</p>
+
+  <h3>The four join types you need to know</h3>
+
+  <div class="diagram">  orders table          customers table
+  ┌────┬──────────┐    ┌──────────┬───────┐
+  │ id │ cust_id  │    │ cust_id  │ name  │
+  ├────┼──────────┤    ├──────────┼───────┤
+  │  1 │   101    │    │   101    │ Alice │
+  │  2 │   102    │    │   102    │ Bob   │
+  │  3 │   999    │    │   103    │ Carol │
+  └────┴──────────┘    └──────────┴───────┘
+  order 3 has no match (999 not in customers)
+  Carol has no orders (103 not in orders)</div>
+
+  <ul>
+    <li><strong>INNER join</strong> — only rows that match in both tables. Order 3 and Carol are both dropped.</li>
+    <li><strong>LEFT join</strong> — all rows from the left table, matched rows from the right. Order 3 is kept (Carol's fields are NULL). Carol is dropped.</li>
+    <li><strong>RIGHT join</strong> — all rows from the right table, matched rows from the left. Carol is kept (order fields are NULL). Order 3 is dropped.</li>
+    <li><strong>FULL OUTER join</strong> — all rows from both tables. Order 3 and Carol are both kept, with NULLs where there's no match.</li>
+  </ul>
+
+  <h3>SQL syntax</h3>
+  <pre>-- Inner join (default when you just write JOIN)
+SELECT o.id, o.amount, c.name
+FROM orders o
+JOIN customers c ON o.cust_id = c.cust_id;
+
+-- Left join
+SELECT o.id, o.amount, c.name
+FROM orders o
+LEFT JOIN customers c ON o.cust_id = c.cust_id;
+
+-- Full outer join
+SELECT o.id, o.amount, c.name
+FROM orders o
+FULL OUTER JOIN customers c ON o.cust_id = c.cust_id;</pre>
+
+  <h3>PySpark syntax</h3>
+  <pre>orders.join(customers, on="cust_id", how="inner")   # or how="left", "right", "outer"
+
+# When the join key has the same name in both DataFrames, pass it as a string.
+# When the names differ, pass a condition:
+orders.join(customers,
+            orders.cust_id == customers.customer_id,
+            how="left")</pre>
+
+  <div class="callout exam-tip">
+    The default join type in both SQL (<code>JOIN</code>) and PySpark (<code>how="inner"</code>) is <strong>INNER</strong>. If the exam shows a JOIN with no qualifier, assume inner.
+  </div>
+
+  <div class="callout exam-tip">
+    A <strong>LEFT join</strong> is the most common exam scenario: "keep all rows from table A even if there's no match in table B." The unmatched rows from B come back as NULL.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>2. Deduplication</h2>
+
+  <p>Duplicate rows are a real-world problem — the same event can arrive twice from a source system. Spark gives you two tools to remove them.</p>
+
+  <h3>dropDuplicates — remove exact duplicate rows</h3>
+  <pre># SQL
+SELECT DISTINCT * FROM orders;
+
+# PySpark — remove rows where every column is identical
+df.distinct()
+
+# PySpark — remove rows where specific columns are identical
+# (keeps the first occurrence)
+df.dropDuplicates(["order_id"])</pre>
+
+  <p><code>dropDuplicates(["order_id"])</code> keeps one row per unique <code>order_id</code>, even if other columns differ. It is the PySpark equivalent of deduplicating on a key column, not the whole row.</p>
+
+  <div class="callout exam-tip">
+    <code>distinct()</code> = whole-row dedup (all columns must match).<br>
+    <code>dropDuplicates(["col"])</code> = key-column dedup (dedup on specific columns only).
+  </div>
+
+  <h3>Window functions for dedup (rank-based)</h3>
+  <p>Sometimes you want to keep the <em>most recent</em> duplicate rather than just any one. The pattern is: rank rows within a group, then keep only rank 1.</p>
+
+  <pre>from pyspark.sql.functions import row_number
+from pyspark.sql.window import Window
+
+# For each order_id, rank rows by updated_at descending (newest first)
+window = Window.partitionBy("order_id").orderBy(col("updated_at").desc())
+
+df.withColumn("rn", row_number().over(window)) \
+  .filter("rn = 1") \
+  .drop("rn")</pre>
+
+  <p>Breaking that down:</p>
+  <ul>
+    <li><code>partitionBy("order_id")</code> — restart the ranking for each unique order_id</li>
+    <li><code>orderBy(col("updated_at").desc())</code> — newest row gets rank 1</li>
+    <li><code>row_number().over(window)</code> — assign the rank</li>
+    <li><code>.filter("rn = 1")</code> — keep only the newest row per order_id</li>
+    <li><code>.drop("rn")</code> — remove the helper column</li>
+  </ul>
+
+  <div class="callout exam-tip">
+    When the exam scenario says "keep the most recent record per key" — think <strong>window function + row_number + filter rn = 1</strong>. <code>distinct()</code> alone can't do this because it doesn't know which duplicate to keep.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>3. Advanced aggregations</h2>
+
+  <p>You saw basic <code>groupBy().agg()</code> in Lesson 5. Here are the patterns that appear most often on the exam.</p>
+
+  <h3>Multiple aggregations in one pass</h3>
+  <pre># SQL
+SELECT customer,
+       COUNT(*)        AS order_count,
+       SUM(amount)     AS total,
+       AVG(amount)     AS avg_order,
+       MAX(amount)     AS largest_order
+FROM orders
+GROUP BY customer;
+
+# PySpark
+from pyspark.sql.functions import count, sum, avg, max
+
+df.groupBy("customer").agg(
+    count("*").alias("order_count"),
+    sum("amount").alias("total"),
+    avg("amount").alias("avg_order"),
+    max("amount").alias("largest_order")
+)</pre>
+
+  <h3>HAVING — filter after grouping</h3>
+  <pre># SQL — HAVING filters the result of GROUP BY (WHERE filters before grouping)
+SELECT customer, COUNT(*) AS order_count
+FROM orders
+GROUP BY customer
+HAVING COUNT(*) > 5;
+
+# PySpark — use .filter() after .agg()
+df.groupBy("customer") \
+  .agg(count("*").alias("order_count")) \
+  .filter("order_count > 5")</pre>
+
+  <div class="callout exam-tip">
+    <strong>WHERE</strong> filters rows <em>before</em> grouping.<br>
+    <strong>HAVING</strong> filters groups <em>after</em> aggregation.<br>
+    In PySpark: <code>.filter()</code> before <code>.groupBy()</code> = WHERE. <code>.filter()</code> after <code>.agg()</code> = HAVING.
+  </div>
+
+  <h3>countDistinct — count unique values</h3>
+  <pre># SQL
+SELECT customer, COUNT(DISTINCT product_id) AS unique_products
+FROM orders
+GROUP BY customer;
+
+# PySpark
+from pyspark.sql.functions import countDistinct
+
+df.groupBy("customer") \
+  .agg(countDistinct("product_id").alias("unique_products"))</pre>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>4. Window functions</h2>
+
+  <p>Window functions compute a value for each row based on a group of related rows — without collapsing the rows the way <code>groupBy</code> does. You get one output row per input row.</p>
+
+  <div class="diagram">  groupBy + agg           Window function
+  ──────────────────────  ──────────────────────────────
+  3 customers → 3 rows    3 customers × N orders → N rows
+  (rows collapsed)        (rows kept, rank added as column)</div>
+
+  <h3>Common window functions</h3>
+  <ul>
+    <li><code>row_number()</code> — unique sequential rank (no ties: 1, 2, 3, 4…)</li>
+    <li><code>rank()</code> — rank with gaps for ties (1, 2, 2, 4…)</li>
+    <li><code>dense_rank()</code> — rank without gaps for ties (1, 2, 2, 3…)</li>
+    <li><code>lag("col", n)</code> — value from n rows before in the window</li>
+    <li><code>lead("col", n)</code> — value from n rows ahead in the window</li>
+  </ul>
+
+  <h3>SQL window syntax</h3>
+  <pre>SELECT customer, amount,
+       ROW_NUMBER() OVER (PARTITION BY customer ORDER BY amount DESC) AS rn
+FROM orders;</pre>
+
+  <h3>PySpark window syntax</h3>
+  <pre>from pyspark.sql.functions import row_number, rank, lag
+from pyspark.sql.window import Window
+
+w = Window.partitionBy("customer").orderBy(col("amount").desc())
+
+df.withColumn("rn",   row_number().over(w)) \
+  .withColumn("rnk",  rank().over(w)) \
+  .withColumn("prev", lag("amount", 1).over(w))</pre>
+
+  <div class="callout exam-tip">
+    <code>PARTITION BY</code> in a window = restart the calculation for each group (like GROUP BY, but rows are not collapsed).<br>
+    <code>ORDER BY</code> in a window = defines the order within each partition for ranking or lag/lead.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>5. MERGE INTO — upsert pattern</h2>
+
+  <p>The most powerful Delta write operation: <strong>MERGE INTO</strong> (also called an upsert — update if exists, insert if not). This is heavily tested because it is the standard pattern for keeping Silver tables in sync with incoming Bronze data.</p>
+
+  <pre>MERGE INTO silver_customers AS target
+USING bronze_updates AS source
+ON target.customer_id = source.customer_id
+
+WHEN MATCHED THEN
+  UPDATE SET
+    target.name   = source.name,
+    target.email  = source.email
+
+WHEN NOT MATCHED THEN
+  INSERT (customer_id, name, email)
+  VALUES (source.customer_id, source.name, source.email);</pre>
+
+  <p>Breaking that down:</p>
+  <ul>
+    <li><code>MERGE INTO target USING source ON key</code> — match rows between two tables on a key</li>
+    <li><code>WHEN MATCHED</code> — row exists in both tables → UPDATE</li>
+    <li><code>WHEN NOT MATCHED</code> — row is in source but not in target → INSERT</li>
+    <li>You can also add <code>WHEN NOT MATCHED BY SOURCE THEN DELETE</code> to delete rows that disappeared from the source</li>
+  </ul>
+
+  <div class="callout exam-tip">
+    MERGE INTO is the exam's go-to answer for "how do you update existing rows and insert new ones in a single operation?" The keyword is <strong>upsert</strong>. If you see that word — MERGE INTO.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Primary source</h2>
+  <p>
+    <a href="https://docs.databricks.com/en/sql/language-manual/delta-merge-into.html" target="_blank">
+      Databricks Docs — MERGE INTO
+    </a>
+    — read the syntax and examples (10 min). This is the most exam-dense page for Domain 3.
+  </p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div
+    class="brain-dump"
+    id="bd6"
+    data-prompt="Without looking back: What are the four join types and what does each keep? What is the default join type in SQL and PySpark? What is the difference between distinct() and dropDuplicates(['col'])? When would you use a window function instead of groupBy? What is the difference between WHERE and HAVING? What does MERGE INTO do — describe the WHEN MATCHED and WHEN NOT MATCHED clauses? What is the word that describes what MERGE INTO performs?"
+    data-points='[
+      "INNER = matched rows only; LEFT = all left + matched right (nulls for no match); RIGHT = all right + matched left; FULL OUTER = all rows from both, nulls where no match",
+      "Default join is INNER in both SQL (JOIN with no qualifier) and PySpark (how=inner)",
+      "distinct() deduplicates on all columns; dropDuplicates([col]) deduplicates on specific key columns only",
+      "Window function keeps all rows and adds a computed column (rank, lag, etc); groupBy collapses rows into one per group",
+      "WHERE filters rows before grouping; HAVING filters groups after aggregation",
+      "WHEN MATCHED = row exists in both tables → UPDATE; WHEN NOT MATCHED = row only in source → INSERT",
+      "MERGE INTO performs an UPSERT — update if the row exists, insert if it does not"
+    ]'
+  ></div>
+
+
+  <div class="nav-links">
+    <a href="0005-pyspark-and-spark-sql-basics.html">← Lesson 05</a>
+    <a href="0007-delta-live-tables.html">Next: Lesson 07 — Delta Live Tables →</a>
+  </div>
+
+  <footer class="lesson-footer">
+    <span>Lesson 06 · Domain 3: Data Processing &amp; Transformations (31%)</span>
+    <span>Ask your teacher to go deeper on anything that's unclear.</span>
+  </footer>
+
+</div>
+<script src="../assets/brain-dump.js"></script>
+</body>
+</html>
