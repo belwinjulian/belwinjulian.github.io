@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 05 — PySpark &amp; Spark SQL Basics</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+  <header class="lesson-header">
+    <p class="lesson-meta">
+      <span class="domain-badge">Domain 3 · 31%</span>
+      Lesson 05 of 12 &nbsp;·&nbsp; Data Processing &amp; Transformations
+    </p>
+    <h1>PySpark &amp; Spark SQL Basics</h1>
+  </header>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>1. Two languages, one engine</h2>
+
+  <p>Spark lets you write data transformations in two styles — and they produce <em>identical results</em> because they run on the same engine underneath:</p>
+
+  <ul>
+    <li><strong>Spark SQL</strong> — plain SQL statements. The exam is SQL-first, so always learn the SQL way first.</li>
+    <li><strong>PySpark (Python API)</strong> — a Python library where you chain method calls on a <em>DataFrame</em> object. Used when SQL can't express the operation cleanly.</li>
+  </ul>
+
+  <div class="diagram">  Your code
+  ┌──────────────────┐    ┌──────────────────┐
+  │  Spark SQL       │    │  PySpark         │
+  │  SELECT name     │    │  df.select("name")│
+  │  FROM orders     │    │  .filter(...)    │
+  │  WHERE amount>50 │    │  .show()         │
+  └────────┬─────────┘    └────────┬─────────┘
+           │                       │
+           └──────────┬────────────┘
+                      ▼
+             Apache Spark engine
+             (same execution plan)</div>
+
+  <div class="callout exam-tip">
+    The exam mixes SQL and PySpark questions freely. If you can read both styles, you can answer both types. The logic is the same — only the syntax changes.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>2. The DataFrame — Spark's core data structure</h2>
+
+  <p>A <strong>DataFrame</strong> is Spark's version of a table: rows and columns, with a defined schema. Every transformation you do in PySpark returns a new DataFrame — you never modify the original.</p>
+
+  <p>There are two ways to get a DataFrame:</p>
+
+  <h3>Load a Delta table as a DataFrame</h3>
+  <pre>df = spark.table("orders")          # read a registered table by name
+df = spark.read.table("orders")     # same thing, alternative syntax</pre>
+
+  <h3>Run SQL and get the result as a DataFrame</h3>
+  <pre>df = spark.sql("SELECT * FROM orders WHERE amount > 50")</pre>
+
+  <p><code>spark.sql()</code> is the bridge between SQL and PySpark — you write SQL inside the string, and you get a DataFrame back that you can keep chaining methods on.</p>
+
+  <div class="callout exam-tip">
+    <code>spark.table("name")</code> and <code>spark.sql("SELECT * FROM name")</code> both give you a DataFrame. Know both — the exam uses both forms.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>3. Core transformations</h2>
+
+  <p>A <strong>transformation</strong> is any operation that produces a new DataFrame from an existing one. Nothing actually runs yet — Spark just builds up a plan. (More on this in section 6.)</p>
+
+  <h3>select — choose columns</h3>
+  <pre># SQL
+SELECT order_id, customer, amount FROM orders;
+
+# PySpark
+df.select("order_id", "customer", "amount")</pre>
+
+  <h3>filter / where — keep rows that match a condition</h3>
+  <pre># SQL
+SELECT * FROM orders WHERE amount > 50;
+
+# PySpark — filter and where are identical, use whichever reads clearer
+df.filter("amount > 50")
+df.where("amount > 50")
+df.filter(df.amount > 50)          # column object syntax</pre>
+
+  <h3>withColumn — add or replace a column</h3>
+  <pre># SQL
+SELECT *, amount * 1.1 AS amount_with_tax FROM orders;
+
+# PySpark
+from pyspark.sql.functions import col
+
+df.withColumn("amount_with_tax", col("amount") * 1.1)</pre>
+
+  <p><code>withColumn</code> either adds a new column (if the name is new) or <strong>replaces</strong> an existing column (if the name already exists). This is a common exam question.</p>
+
+  <h3>drop — remove a column</h3>
+  <pre># SQL — no direct equivalent; use SELECT with columns listed explicitly
+
+# PySpark
+df.drop("internal_id", "raw_json")</pre>
+
+  <h3>withColumnRenamed — rename a column</h3>
+  <pre># SQL
+SELECT order_id AS id, customer AS name FROM orders;
+
+# PySpark
+df.withColumnRenamed("order_id", "id") \
+  .withColumnRenamed("customer", "name")</pre>
+
+  <div class="callout exam-tip">
+    <code>withColumn("x", expr)</code> with an existing column name <strong>replaces</strong> that column — it does not add a second column named "x". This trips people up on the exam.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>4. Aggregations</h2>
+
+  <p>Aggregations reduce many rows down to summary values. In PySpark you always pair <code>groupBy</code> with <code>agg</code> (or a shorthand method).</p>
+
+  <h3>SQL</h3>
+  <pre>SELECT customer, COUNT(*) AS order_count, SUM(amount) AS total
+FROM orders
+GROUP BY customer;</pre>
+
+  <h3>PySpark</h3>
+  <pre>from pyspark.sql.functions import count, sum
+
+df.groupBy("customer") \
+  .agg(
+    count("*").alias("order_count"),
+    sum("amount").alias("total")
+  )</pre>
+
+  <p>Common aggregation functions you need to know:</p>
+  <ul>
+    <li><code>count("*")</code> — count all rows</li>
+    <li><code>sum("col")</code> — total</li>
+    <li><code>avg("col")</code> — average</li>
+    <li><code>min("col")</code> / <code>max("col")</code> — min and max</li>
+    <li><code>countDistinct("col")</code> — count of unique values</li>
+  </ul>
+
+  <div class="callout exam-tip">
+    In PySpark, <code>.alias("name")</code> is the equivalent of SQL's <code>AS name</code>. You'll see it inside <code>.agg()</code> calls.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>5. Sorting</h2>
+
+  <pre># SQL
+SELECT * FROM orders ORDER BY amount DESC;
+
+# PySpark — orderBy and sort are identical
+df.orderBy("amount", ascending=False)
+df.sort("amount", ascending=False)
+
+# Multiple columns
+df.orderBy(col("amount").desc(), col("customer").asc())</pre>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>6. Lazy evaluation — the most important concept in Spark</h2>
+
+  <p>This is the concept that trips up almost every Spark beginner and shows up on the exam.</p>
+
+  <p>When you write a PySpark transformation like <code>df.filter(...).select(...).withColumn(...)</code>, <strong>Spark does not run any of it yet</strong>. It just builds up a plan — a recipe for what to do. Nothing touches the data.</p>
+
+  <p>Spark only actually executes when you call an <strong>action</strong>. An action is anything that needs to return a result to you or write data somewhere.</p>
+
+  <div class="diagram">  TRANSFORMATIONS (lazy — just building the plan)
+  ──────────────────────────────────────────────
+  df.filter(...)         no data movement
+  df.select(...)         no data movement
+  df.groupBy(...).agg()  no data movement
+  df.join(...)           no data movement
+
+  ACTIONS (trigger execution — Spark actually runs)
+  ──────────────────────────────────────────────────
+  df.show()              prints rows to screen
+  df.count()             returns a number
+  df.collect()           returns all rows to driver (careful: memory!)
+  df.write.saveAsTable() writes to a Delta table</div>
+
+  <div class="callout exam-tip">
+    If the exam asks "when does Spark actually execute your code?" — the answer is: <strong>when an action is called</strong>. Transformations are lazy; actions trigger execution.
+  </div>
+
+  <h3>Why lazy evaluation exists</h3>
+  <p>Spark uses the built-up plan to <em>optimise</em> before running. If you filter then select, Spark can reorder those steps to push the filter as early as possible and avoid reading unnecessary data. You get better performance without thinking about it.</p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>7. Chaining — the PySpark style</h2>
+
+  <p>PySpark is designed to be chained. Each method returns a new DataFrame, so you can stack operations cleanly:</p>
+
+  <pre>result = (
+    spark.table("orders")
+    .filter("amount > 50")
+    .withColumn("amount_with_tax", col("amount") * 1.1)
+    .select("order_id", "customer", "amount_with_tax")
+    .orderBy("amount_with_tax", ascending=False)
+)
+
+result.show(10)          # action — executes everything above</pre>
+
+  <p>The parentheses around the whole chain let you split it across multiple lines for readability — a pattern you will see constantly in exam code.</p>
+
+  <div class="callout note">
+    The chain above runs as a <em>single optimised job</em> when <code>.show(10)</code> is called. Spark doesn't execute each line one by one — it plans the whole thing first.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>8. Registering a DataFrame as a temporary view</h2>
+
+  <p>Sometimes you want to write SQL against a DataFrame that isn't a registered Delta table. You can temporarily register it:</p>
+
+  <pre>df.createOrReplaceTempView("orders_view")
+
+# Now you can query it with SQL
+spark.sql("SELECT customer, SUM(amount) FROM orders_view GROUP BY customer")</pre>
+
+  <p><code>createOrReplaceTempView</code> only exists for the current Spark session — it is not persisted to disk and disappears when the cluster restarts.</p>
+
+  <div class="callout exam-tip">
+    A <strong>temp view</strong> is session-scoped and not persisted. A <strong>Delta table</strong> is persisted to disk and survives cluster restarts. If the exam asks which one disappears when the cluster stops — temp view.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Primary source</h2>
+  <p>
+    <a href="https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/dataframe.html" target="_blank">
+      PySpark DataFrame API reference
+    </a>
+    — scan the method list to build familiarity (10 min). Focus on: select, filter, withColumn, groupBy, orderBy, show.
+  </p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div
+    class="brain-dump"
+    id="bd5"
+    data-prompt="Without looking back: What is a DataFrame in Spark? What are two ways to load a Delta table as a DataFrame? What does withColumn do if you use an existing column name? What is the difference between filter and where? How do you do a GROUP BY + SUM in PySpark? What is lazy evaluation — when does Spark actually run your code? Name three actions that trigger execution. What is a temp view and how does it differ from a Delta table?"
+    data-points='[
+      "A DataFrame is Spark&apos;s table structure — rows and columns with a schema. Transformations return new DataFrames, never modify the original.",
+      "spark.table(\"name\") or spark.read.table(\"name\") or spark.sql(\"SELECT * FROM name\")",
+      "withColumn with an existing column name REPLACES that column — it does not add a second one",
+      "filter and where are identical — use whichever reads clearer",
+      "df.groupBy(\"customer\").agg(sum(\"amount\").alias(\"total\"))",
+      "Lazy evaluation: transformations only build a plan; Spark does not touch data until an action is called",
+      "Actions: show(), count(), collect(), write.saveAsTable() — any of these triggers execution",
+      "Temp view = session-scoped, not persisted, disappears on cluster restart. Delta table = persisted to disk, survives restarts."
+    ]'
+  ></div>
+
+
+  <div class="nav-links">
+    <a href="0004-streaming-schema-evolution-lakeflow-connect.html">← Lesson 04</a>
+    <a href="0006-dataframe-operations-joins-dedup-aggregations.html">Next: Lesson 06 — DataFrame Operations: Joins, Dedup &amp; Aggregations →</a>
+  </div>
+
+  <footer class="lesson-footer">
+    <span>Lesson 05 · Domain 3: Data Processing &amp; Transformations (31%)</span>
+    <span>Ask your teacher to go deeper on anything that's unclear.</span>
+  </footer>
+
+</div>
+<script src="../assets/brain-dump.js"></script>
+</body>
+</html>
