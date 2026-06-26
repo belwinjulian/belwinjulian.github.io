@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 07 — Delta Live Tables</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="lesson-wrap">
+
+  <header class="lesson-header">
+    <p class="lesson-meta">
+      <span class="domain-badge">Domain 2 &amp; 4 · 48%</span>
+      Lesson 07 of 12 &nbsp;·&nbsp; Development &amp; Ingestion + Productionizing
+    </p>
+    <h1>Delta Live Tables (DLT)</h1>
+  </header>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>1. What is DLT and why does it matter?</h2>
+
+  <p>Building a multi-stage pipeline normally means writing and managing multiple notebooks yourself: run Bronze first, then Silver, then Gold, retry on failure, track schema changes, validate data quality. That is a lot of plumbing code.</p>
+
+  <p><strong>Delta Live Tables (DLT)</strong> is Databricks' declarative pipeline framework. You write SQL or Python that says <em>what</em> each table should contain — DLT figures out the execution order, manages checkpoints, handles retries, and enforces data quality rules automatically.</p>
+
+  <div class="diagram">  Without DLT                     With DLT
+  ─────────────────────────────────────────────────────
+  You manage:                     DLT manages:
+  • Notebook execution order      • Dependency resolution
+  • Retries on failure            • Automatic retries
+  • Checkpoint files              • Checkpointing
+  • Schema change handling        • Schema evolution
+  • Data quality checks (custom)  • Built-in Expectations
+  • Cluster lifecycle             • Cluster lifecycle
+
+  You write: job orchestration    You write: table definitions</div>
+
+  <p>A <strong>pipeline</strong> is a group of DLT notebooks or SQL files. When you run a pipeline, DLT builds a dependency graph of all your table definitions and executes them in the correct order.</p>
+
+  <div class="callout exam-tip">
+    DLT is <strong>declarative</strong> — you define tables, not steps. This is the key distinction from regular Spark notebooks where you write imperative code to run transformations manually.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>2. Two table types: Streaming Tables vs. Materialized Views</h2>
+
+  <p>Every DLT table is one of two types. Choosing the right one is a core exam question.</p>
+
+  <h3>Streaming Table</h3>
+  <p>Processes new data <em>incrementally</em>. Only rows that arrived since the last pipeline run are processed — previously seen rows are not reprocessed. This is the correct type when data flows in continuously over time (Auto Loader files, Kafka events, CDC feeds).</p>
+
+  <h3>Materialized View</h3>
+  <p>Recomputed from <em>all source data</em> on each pipeline update. Think of it as a stored view — the query result is persisted to a Delta table. Use when the output must reflect the full picture (aggregations, joins across the whole dataset).</p>
+
+  <div class="diagram">                Streaming Table          Materialized View
+  ─────────────────────────────────────────────────────────────
+  Source         Append-only stream       Any table or query
+  Processing     Incremental (new rows)   Full recompute each run
+  State          Checkpoint tracks offset Query re-runs fully
+  Best for       Bronze ingestion,        Gold aggregations,
+                 row-level Silver filter  cross-table joins,
+                                          metrics dashboards
+  SQL keyword    STREAMING TABLE          MATERIALIZED VIEW</div>
+
+  <div class="callout exam-tip">
+    Decision rule: <strong>Is new data always appended?</strong> → Streaming Table.<br>
+    <strong>Does the result depend on all historical rows?</strong> → Materialized View.
+  </div>
+
+  <div class="callout exam-tip">
+    A Streaming Table can <em>read from</em> another Streaming Table using <code>STREAM(LIVE.table)</code>. A Materialized View reads from a Materialized View or a Streaming Table using <code>LIVE.table</code> (no STREAM wrapper). Mixing these up is a common exam trap.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>3. DLT SQL syntax</h2>
+
+  <p>The exam is SQL-first. Learn these two statements cold.</p>
+
+  <h3>Creating a Streaming Table (Bronze — raw ingestion)</h3>
+  <pre>CREATE OR REFRESH STREAMING TABLE bronze_orders
+AS SELECT * FROM STREAM read_files(
+  's3://my-bucket/raw/orders/',
+  format => 'json'
+);</pre>
+
+  <p>Breaking that down:</p>
+  <ul>
+    <li><code>CREATE OR REFRESH STREAMING TABLE</code> — creates the table if it doesn't exist, otherwise refreshes it incrementally</li>
+    <li><code>STREAM read_files(...)</code> — reads files from cloud storage as a stream (DLT's SQL-native equivalent of Auto Loader)</li>
+    <li><code>format =&gt; 'json'</code> — the file format (json, csv, parquet, avro…)</li>
+  </ul>
+
+  <h3>The LIVE. prefix — referencing DLT tables</h3>
+  <p>Inside a DLT pipeline, you reference other DLT tables with the <code>LIVE.</code> prefix. This tells DLT "this is a table managed by this pipeline" and is how the dependency graph is built.</p>
+
+  <pre>-- Silver: reads from the Bronze streaming table, filters bad rows
+CREATE OR REFRESH STREAMING TABLE silver_orders
+AS SELECT *
+FROM STREAM(LIVE.bronze_orders)   -- STREAM() wrapper = read as stream
+WHERE amount > 0
+  AND customer_id IS NOT NULL;</pre>
+
+  <div class="callout exam-tip">
+    <code>LIVE.table_name</code> = reference to another DLT table in the same pipeline.<br>
+    <code>STREAM(LIVE.table_name)</code> = read that DLT table <em>as a stream</em> (incrementally).<br>
+    Forget <code>LIVE.</code> and the table is treated as an external table — DLT won't manage the dependency.
+  </div>
+
+  <h3>Creating a Materialized View (Gold — aggregation)</h3>
+  <pre>-- Gold: aggregated revenue per day (reads ALL rows from Silver each run)
+CREATE OR REFRESH MATERIALIZED VIEW gold_daily_revenue
+AS SELECT
+  date(order_ts)    AS order_date,
+  SUM(amount)       AS total_revenue,
+  COUNT(*)          AS order_count
+FROM LIVE.silver_orders          -- no STREAM() wrapper = full recompute
+GROUP BY date(order_ts);</pre>
+
+  <h3>Full Medallion pipeline in SQL</h3>
+  <div class="diagram">  read_files()          STREAM(LIVE.bronze)    LIVE.silver
+      │                        │                       │
+      ▼                        ▼                       ▼
+  ┌────────┐             ┌──────────┐            ┌──────────┐
+  │ Bronze │─────────────▶  Silver  │────────────▶   Gold   │
+  │Streaming│            │Streaming │            │Mat. View │
+  └────────┘             └──────────┘            └──────────┘
+  raw JSON from           filter + clean         aggregate revenue
+  cloud storage           bad rows dropped        per day</div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>4. DLT Python syntax</h2>
+
+  <p>Python DLT uses decorators. Each function becomes a DLT table — the function name is the table name.</p>
+
+  <pre>import dlt
+from pyspark.sql.functions import col
+
+# Bronze: ingest from Auto Loader (streaming)
+@dlt.table(comment="Raw orders from cloud storage")
+def bronze_orders():
+    return (spark.readStream
+            .format("cloudFiles")
+            .option("cloudFiles.format", "json")
+            .option("cloudFiles.schemaLocation", "/checkpoints/orders_schema")
+            .load("s3://my-bucket/raw/orders/"))
+
+# Silver: read Bronze as a stream, filter bad rows
+@dlt.table
+def silver_orders():
+    return (dlt.read_stream("bronze_orders")   # incremental read
+            .filter("amount > 0")
+            .filter(col("customer_id").isNotNull()))
+
+# Gold: aggregate Silver (full recompute)
+@dlt.table
+def gold_daily_revenue():
+    return (dlt.read("silver_orders")          # full read (no _stream)
+            .groupBy("order_date")
+            .agg({"amount": "sum"}))</pre>
+
+  <div class="callout exam-tip">
+    <code>dlt.read_stream("table")</code> = incremental read of a Streaming Table (like <code>STREAM(LIVE.table)</code> in SQL).<br>
+    <code>dlt.read("table")</code> = full read for a Materialized View (like <code>LIVE.table</code> in SQL).<br>
+    The function name becomes the table name. No quotes, no <code>LIVE.</code> needed — that's the Python equivalent.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>5. Data quality with Expectations</h2>
+
+  <p>Expectations are DLT's built-in data quality constraints. You define a rule and specify what happens when a row violates it. This replaces writing your own quality checks in Spark code.</p>
+
+  <p>There are three behaviors on violation:</p>
+
+  <div class="diagram">  Behavior          What happens to violating rows     Pipeline
+  ────────────────────────────────────────────────────────────
+  WARN (default)    Row is kept, violation is recorded  Continues
+  DROP ROW          Row is silently dropped              Continues
+  FAIL UPDATE       Row is rejected, pipeline stops      Stops</div>
+
+  <h3>SQL Expectations syntax</h3>
+  <pre>CREATE OR REFRESH STREAMING TABLE silver_orders (
+  CONSTRAINT valid_amount
+    EXPECT (amount > 0),                          -- warn (default)
+
+  CONSTRAINT has_customer
+    EXPECT (customer_id IS NOT NULL)
+    ON VIOLATION DROP ROW,                        -- drop bad rows
+
+  CONSTRAINT recent_order
+    EXPECT (order_date >= '2020-01-01')
+    ON VIOLATION FAIL UPDATE                      -- stop the pipeline
+)
+AS SELECT * FROM STREAM(LIVE.bronze_orders);</pre>
+
+  <h3>Python Expectations syntax</h3>
+  <pre>@dlt.expect("valid_amount", "amount > 0")                     # warn
+@dlt.expect_or_drop("has_customer", "customer_id IS NOT NULL") # drop
+@dlt.expect_or_fail("recent_order", "order_date >= '2020-01-01'") # fail
+@dlt.table
+def silver_orders():
+    return dlt.read_stream("bronze_orders")</pre>
+
+  <div class="callout exam-tip">
+    The three Python decorators map directly to the three behaviors:<br>
+    <code>@dlt.expect</code> → warn &nbsp;|&nbsp; <code>@dlt.expect_or_drop</code> → drop &nbsp;|&nbsp; <code>@dlt.expect_or_fail</code> → fail<br>
+    If the exam says "rows that violate quality rules should not appear in the output but the pipeline should keep running" — that is <strong>DROP ROW</strong>.
+  </div>
+
+  <div class="callout exam-tip">
+    Expectation violations are tracked in the DLT event log and visible in the pipeline UI as metrics. WARN violations do NOT stop the pipeline — they are surfaced for monitoring only.
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>6. Pipeline modes and updates</h2>
+
+  <h3>Development vs. Production mode</h3>
+  <p>When you create a DLT pipeline you choose a mode:</p>
+  <ul>
+    <li><strong>Development mode</strong> — cluster is reused between runs (faster iteration), pipeline does NOT auto-restart on failure. Use while building and testing.</li>
+    <li><strong>Production mode</strong> — fresh cluster each run (isolated), pipeline auto-restarts on recoverable failures. Use when scheduling the pipeline to run on a schedule.</li>
+  </ul>
+
+  <div class="callout exam-tip">
+    Development mode reuses the cluster to save startup time. Production mode uses a fresh cluster for isolation and has auto-retry. The exam will ask "which mode auto-restarts on failure?" — Production.
+  </div>
+
+  <h3>Update types</h3>
+  <p>When you trigger a pipeline update (a run), you choose how it processes data:</p>
+  <ul>
+    <li><strong>Triggered update</strong> — process all new data once, then stop. The pipeline runs, catches up, and shuts down.</li>
+    <li><strong>Continuous update</strong> — pipeline stays running and processes data as it arrives with low latency.</li>
+    <li><strong>Full refresh</strong> — clears all existing table data and reprocesses everything from scratch. Use when you change the pipeline logic and need to recompute history.</li>
+  </ul>
+
+  <div class="callout exam-tip">
+    <strong>Full refresh</strong> is the answer when the exam says "the pipeline logic changed and the existing table data is incorrect." It wipes and recomputes. For normal incremental operation, use Triggered (batch-style) or Continuous (streaming).
+  </div>
+
+  <h3>DLT pipeline vs. Lakeflow Jobs</h3>
+  <p>These solve different problems:</p>
+  <div class="diagram">                DLT Pipeline             Lakeflow Job
+  ────────────────────────────────────────────────────────────
+  What it manages  Table dependencies       Task dependencies
+  What you define  Table SQL/Python         Notebook/task order
+  Data quality     Built-in Expectations   Custom code
+  Best for         Multi-table pipelines   Orchestrating mixed tasks
+                   with quality rules      (notebooks, SQL, Python)</div>
+
+  <p>A common pattern is to trigger a DLT pipeline <em>from</em> a Lakeflow Job as one task in a larger workflow.</p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <h2>Primary source</h2>
+  <p>
+    <a href="https://docs.databricks.com/en/delta-live-tables/index.html" target="_blank">
+      Databricks Docs — What is Delta Live Tables?
+    </a>
+    — read the overview and the "Develop pipelines" section (15 min). Focus on the SQL examples — the exam is SQL-first.
+  </p>
+
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div
+    class="brain-dump"
+    id="bd7"
+    data-prompt="Without looking back: What problem does DLT solve compared to plain Spark notebooks? What is the difference between a Streaming Table and a Materialized View — when do you use each? What does the LIVE. prefix do and why is it required? What is the difference between STREAM(LIVE.table) and LIVE.table in SQL? Write the SQL to create a Streaming Table reading from cloud storage. Write the SQL to create a Materialized View aggregating from a DLT table. What are the three Expectation behaviors and what does each do to violating rows? What is the difference between Development and Production pipeline mode? What does a Full Refresh do?"
+    data-points='[
+      "DLT manages dependency ordering, retries, checkpointing, and data quality automatically — you define tables, not execution steps",
+      "Streaming Table = incremental, processes only new rows since last run; Materialized View = full recompute from all data on each run",
+      "LIVE. prefix tells DLT the table is managed by this pipeline and builds the dependency graph — without it, DLT treats the table as external",
+      "STREAM(LIVE.table) = read the DLT table incrementally as a stream; LIVE.table (no STREAM) = read all rows for a full recompute",
+      "CREATE OR REFRESH STREAMING TABLE name AS SELECT * FROM STREAM read_files(path, format => type)",
+      "CREATE OR REFRESH MATERIALIZED VIEW name AS SELECT ..., agg() FROM LIVE.source_table GROUP BY ...",
+      "WARN (default) = keep the row, record violation, pipeline continues; DROP ROW = silently drop the row, pipeline continues; FAIL UPDATE = stop the pipeline",
+      "Development mode reuses the cluster between runs and does NOT auto-restart on failure; Production mode uses a fresh cluster and auto-restarts on recoverable failures",
+      "Full Refresh clears all existing table data and reprocesses everything from the source — used when pipeline logic changes and old results are incorrect"
+    ]'
+  ></div>
+
+
+  <div class="nav-links">
+    <a href="0006-dataframe-operations-joins-dedup-aggregations.html">← Lesson 06</a>
+    <a href="0008-lakeflow-jobs-productionizing.html">Next: Lesson 08 — Lakeflow Jobs &amp; Productionizing →</a>
+  </div>
+
+  <footer class="lesson-footer">
+    <span>Lesson 07 · Domain 2: Development &amp; Ingestion (30%) + Domain 4: Productionizing (18%)</span>
+    <span>Ask your teacher to go deeper on anything that's unclear.</span>
+  </footer>
+
+</div>
+<script src="../assets/brain-dump.js"></script>
+</body>
+</html>
